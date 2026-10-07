@@ -224,19 +224,19 @@ static void *job_run(void *a) { job_t *j = (job_t *)a; j->fn(j->ctx, j->y0, j->y
 #endif
 /* row bands, one thread per online CPU (max 8), created per call; serial for small work.
    roww (optional, one entry per row from y0) balances the bands by work instead of by row count. */
-static void par_rows_w(rowfn fn, void *ctx, int y0, int y1, long work, const long *roww) {
+static void par_rows_w(rowfn fn, void *ctx, int y0, int y1, int64_t work, const int64_t *roww) {
 #if PZ_THREADS
-  long nt = sysconf(_SC_NPROCESSORS_ONLN);
+  int64_t nt = sysconf(_SC_NPROCESSORS_ONLN);
   if (nt < 1) nt = 1;
   if (nt > 8) nt = 8;
   if (work < 120000 || nt == 1 || y1 - y0 < 16) { fn(ctx, y0, y1); return; }
   pthread_t th[8]; job_t jobs[8]; int ok[8] = {0};
   int n = y1 - y0;
-  for (int i = 0; i < nt; i++) { jobs[i].fn = fn; jobs[i].ctx = ctx; jobs[i].y0 = y0 + (int)((long)n * i / nt); jobs[i].y1 = y0 + (int)((long)n * (i + 1) / nt); }
+  for (int i = 0; i < nt; i++) { jobs[i].fn = fn; jobs[i].ctx = ctx; jobs[i].y0 = y0 + (int)((int64_t)n * i / nt); jobs[i].y1 = y0 + (int)((int64_t)n * (i + 1) / nt); }
   if (roww) {
-    long tot = 0;
+    int64_t tot = 0;
     for (int y = 0; y < n; y++) tot += roww[y];
-    long run = 0; int b = 1;
+    int64_t run = 0; int b = 1;
     for (int y = 0; y < n && b < nt; y++) {
       run += roww[y];
       while (b < nt && run * nt >= tot * b) { jobs[b - 1].y1 = jobs[b].y0 = y0 + y + 1; b++; }
@@ -252,7 +252,7 @@ static void par_rows_w(rowfn fn, void *ctx, int y0, int y1, long work, const lon
   fn(ctx, y0, y1);
 #endif
 }
-static void par_rows(rowfn fn, void *ctx, int y0, int y1, long work) { par_rows_w(fn, ctx, y0, y1, work, NULL); }
+static void par_rows(rowfn fn, void *ctx, int y0, int y1, int64_t work) { par_rows_w(fn, ctx, y0, y1, work, NULL); }
 
 /* ------------------------------------------------------------------ per-frame context */
 typedef struct {
@@ -548,7 +548,7 @@ static int ccl(const uint8_t *m, int w, int h, int *lab) {
 
 /* ================================================================== TEXT: ransom-note scraps */
 typedef struct grp_s {
-  int x0, y0, x1, y1; long area;
+  int x0, y0, x1, y1; int64_t area;
   float cx, cy;
   int order;
   float rc, rs, sc, tx, ty;   /* forward transform about (cx,cy) */
@@ -561,7 +561,7 @@ typedef struct grp_s {
   int ox0, oy0, ox1, oy1;     /* output bbox */
 } grp_t;
 
-typedef struct { int x0, y0, x1, y1; long area; } comp_t;
+typedef struct { int x0, y0, x1, y1; int64_t area; } comp_t;
 
 typedef struct { float key; int idx; } keyidx_t;
 static int cmp_key(const void *a, const void *b) {
@@ -718,7 +718,7 @@ static int run_text(ctx_t *c, int force) {
   uint8_t *m = (uint8_t *)malloc(N);
   int *lab = (int *)malloc(sizeof(int) * N);
   comp_t *comps = NULL; int *gpar = NULL, *c2g = NULL, *ord = NULL; grp_t *groups = NULL; float *acc = NULL; keyidx_t *keys = NULL;
-  int *zord = NULL; long *roww = NULL;
+  int *zord = NULL; int64_t *roww = NULL;
   if (!m || !lab) goto done;
   for (size_t i = 0; i < N; i++) m[i] = c->src[4 * i + 3] >= 128;
   int nc = ccl(m, w, h, lab);
@@ -762,7 +762,7 @@ static int run_text(ctx_t *c, int force) {
       if (y > cp->y1) cp->y1 = y;
       cp->area++;
     }
-  long minarea = (long)fmaxf(3.f, 3.f * c->k * c->k);
+  int64_t minarea = (int64_t)fmaxf(3.f, 3.f * c->k * c->k);
   int nv = 0;
   for (int l = 1; l <= nc; l++) if (comps[l].area >= minarea) ord[nv++] = l;
   if (!nv) goto done;
@@ -792,10 +792,11 @@ static int run_text(ctx_t *c, int force) {
   int ng = 0;
   for (int a = 0; a < nv; a++) { int r = uf_find(gpar, ord[a]); if (c2g[r] < 0) c2g[r] = ng++; }
   for (int a = 0; a < nv; a++) c2g[ord[a]] = c2g[uf_find(gpar, ord[a])];
-  groups = (grp_t *)calloc(ng, sizeof(grp_t));
+  if (ng <= 0) goto done;
+  groups = (grp_t *)calloc((size_t)ng, sizeof(grp_t));
   if (!groups) goto done;
   for (int g = 0; g < ng; g++) { groups[g].x0 = w; groups[g].y0 = h; groups[g].x1 = -1; groups[g].y1 = -1; }
-  long total = 0, maxa = 0;
+  int64_t total = 0, maxa = 0;
   for (int a = 0; a < nv; a++) {
     const comp_t *A = &comps[ord[a]];
     grp_t *g = &groups[c2g[ord[a]]];
@@ -912,21 +913,21 @@ static int run_text(ctx_t *c, int force) {
   for (int g = 0; g < ng; g++) { keys[g].key = groups[g].z; keys[g].idx = g; }
   qsort(keys, ng, sizeof(keyidx_t), cmp_key);
   zord = (int *)malloc(sizeof(int) * ng);
-  roww = (long *)calloc((size_t)h + 1, sizeof(long));
+  roww = (int64_t *)calloc((size_t)h + 1, sizeof(int64_t));
   if (!zord || !roww) goto done;
-  long work = 0;
+  int64_t work = 0;
   for (int i = 0; i < ng; i++) {
     const grp_t *G = &groups[keys[i].idx];
     zord[i] = keys[i].idx;
     if (G->ox1 <= G->ox0 || G->oy1 <= G->oy0) continue;
-    long wd = G->ox1 - G->ox0;
+    int64_t wd = G->ox1 - G->ox0;
     roww[G->oy0] += wd; roww[G->oy1] -= wd; work += wd * (G->oy1 - G->oy0);
   }
-  for (long y = 0, run = 0; y < h; y++) { run += roww[y]; roww[y] = run + 1; }
+  for (int64_t y = 0, run = 0; y < h; y++) { run += roww[y]; roww[y] = run + 1; }
   c->zord = zord;
   /* all letters in one parallel pass, bands balanced by how much text crosses each row */
   par_rows_w(text_rows, c, 0, h, work, roww);
-  par_rows(acc_rows, c, 0, h, (long)N);
+  par_rows(acc_rows, c, 0, h, (int64_t)N);
   ok = 1;
 done:
   free(m); free(lab); free(comps); free(gpar); free(c2g); free(ord); free(groups); free(acc); free(keys);
@@ -957,7 +958,7 @@ static void edt1d(const double *f, int n, double *d, int *v, double *z) {
 }
 static int edt(const uint8_t *mask, int w, int h, float *out) {
   int n = w > h ? w : h;
-  double *f = (double *)malloc(sizeof(double) * n), *d = (double *)malloc(sizeof(double) * n), *z = (double *)malloc(sizeof(double) * (n + 1));
+  double *f = (double *)calloc((size_t)n, sizeof(double)), *d = (double *)malloc(sizeof(double) * n), *z = (double *)malloc(sizeof(double) * (n + 1));
   int *v = (int *)malloc(sizeof(int) * n);
   double *tmp = (double *)malloc(sizeof(double) * (size_t)w * h);
   if (!f || !d || !z || !v || !tmp) { free(f); free(d); free(z); free(v); free(tmp); return 0; }
@@ -985,8 +986,8 @@ static inline int dir_of(int dx, int dy) {
 /* Moore-neighbour tracing of the outer boundary of the component containing (sx,sy), the first pixel in raster order. */
 static int trace(const int *lab, int l, int w, int h, int sx, int sy, float **pts, int *cap) {
   int n = 0, px = sx, py = sy, bdir = 0, first = -1;
-  long maxit = 4L * ((long)w + h) * 8 + 100000;
-  for (long it = 0; it < maxit; it++) {
+  int64_t maxit = 4L * ((int64_t)w + h) * 8 + 100000;
+  for (int64_t it = 0; it < maxit; it++) {
     if (n + 1 >= *cap) {
       *cap *= 2;
       float *np = (float *)realloc(*pts, sizeof(float) * 2 * (*cap));
@@ -1461,7 +1462,7 @@ static void run_element(ctx_t *c) {
     for (int i = 0; i < 3; i++) c->accY[i] = cnt[i] > 0 ? (float)(sum[i] / cnt[i]) : lum(A[i].r, A[i].g, A[i].b);
     c->gain = 1.f + 3.f * clampf((float)in->p[P_CONTRAST], 0, 1);
   }
-  par_rows(element_rows, c, 0, h, (long)N);
+  par_rows(element_rows, c, 0, h, (int64_t)N);
   if (locked) pz_mutex_unlock(&in->mu);
   if (own) { free(dist); free(pb); free(keyA); free(colA); }
 }
@@ -1492,6 +1493,9 @@ void f0r_get_param_info(f0r_param_info_t *info, int i) {
 static rgbf hexc(uint32_t v) { rgbf c = {((v >> 16) & 255) / 255.f, ((v >> 8) & 255) / 255.f, (v & 255) / 255.f}; return c; }
 
 f0r_instance_t f0r_construct(unsigned int width, unsigned int height) {
+  /* frame offsets are computed in size_t from int coordinates; the largest
+     per-pixel buffer is 16 bytes (the float RGBA accumulator) */
+  if (!width || !height || width > 32768 || height > 32768) return NULL;
   pz_once(init_tables);
   if (!g_noise || !g_paper) return NULL;
   inst_t *in = (inst_t *)calloc(1, sizeof(inst_t));
@@ -1517,12 +1521,16 @@ void f0r_set_param_value(f0r_instance_t inst, f0r_param_t param, int i) {
   if (!in || !param || i < 0 || i >= NPARAM) return;
   if (PDEF[i].type == F0R_PARAM_COLOR) {
     const f0r_param_color_t *c = (const f0r_param_color_t *)param;
-    rgbf v = {clamp01(c->r), clamp01(c->g), clamp01(c->b)};
+    rgbf v = in->col[i - FIRSTCOL]; /* a non-finite component keeps the current value */
+    if (isfinite(c->r)) v.r = clamp01(c->r);
+    if (isfinite(c->g)) v.g = clamp01(c->g);
+    if (isfinite(c->b)) v.b = clamp01(c->b);
     in->col[i - FIRSTCOL] = v;
   } else {
+    /* every value stays in the API's 0..1 range, so the getter returns what the plugin uses */
     double v = *(const double *)param;
-    if (v != v) v = PDEF[i].def; /* NaN */
-    in->p[i] = v;
+    if (!isfinite(v)) return;
+    in->p[i] = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
   }
 }
 void f0r_get_param_value(f0r_instance_t inst, f0r_param_t param, int i) {
@@ -1601,7 +1609,7 @@ void f0r_update(f0r_instance_t inst, double time, const uint32_t *inframe, uint3
     }
     c.wob = (1.f * rough + 3.f * rough * rough) * c.k;
     c.jit = rough * 0.4f * cell;
-    par_rows(image_rows, &c, 0, h, (long)N);
+    par_rows(image_rows, &c, 0, h, (int64_t)N);
   } else {
     int done = 0;
     if (mode == -1 || mode == 1) {
